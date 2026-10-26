@@ -1,0 +1,376 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="dark">
+  <title>仿真轨迹人工标注</title>
+  <style>
+    :root { font-family: system-ui, -apple-system, "Segoe UI", sans-serif; background: #101722; color: #eaf0fa; }
+    * { box-sizing: border-box; }
+    body { margin: 0; padding: clamp(12px, 2vw, 28px); }
+    main { max-width: 1600px; margin: auto; display: grid; gap: 16px; }
+    h1, h2, p { margin: 0; }
+    h1 { font-size: clamp(1.35rem, 2.4vw, 2rem); }
+    h2 { font-size: 1.05rem; margin-bottom: 10px; }
+    .muted { color: #afbdcf; }
+    .notice { color: #ffda82; }
+    .error { color: #ff9b9b; }
+    .panel { background: #1b2635; border: 1px solid #344359; border-radius: 12px; padding: 16px; min-width: 0; }
+    header { display: flex; flex-wrap: wrap; justify-content: space-between; gap: 12px; align-items: center; }
+    .row { display: flex; align-items: center; flex-wrap: wrap; gap: 10px 16px; }
+    .viewer { background: #070d16; position: relative; display: grid; place-items: center; min-height: 300px; border-radius: 8px; overflow: hidden; }
+    #top-frame { width: 100%; max-height: min(72vh, 900px); object-fit: contain; display: block; }
+    #top-frame[hidden] { display: none; }
+    #frame-empty { position: absolute; padding: 14px; text-align: center; color: #afbdcf; }
+    .actions { display: flex; flex-wrap: wrap; gap: 10px; }
+    button { cursor: pointer; color: white; border: 0; border-radius: 8px; padding: 12px 18px; font: inherit; font-weight: 700; }
+    button:disabled { cursor: not-allowed; opacity: .42; }
+    #success { background: #217b54; }
+    #failure { background: #a94343; }
+    #stop { background: #3d4d62; }
+    button:focus-visible { outline: 3px solid #f7dc82; outline-offset: 3px; }
+    .metrics { display: grid; grid-template-columns: repeat(auto-fit, minmax(130px, 1fr)); gap: 10px; }
+    .metric { background: #152030; border-radius: 8px; padding: 12px; }
+    .metric strong { display: block; font-size: 1.35rem; margin-top: 5px; font-variant-numeric: tabular-nums; }
+    .details { display: grid; grid-template-columns: repeat(auto-fit, minmax(250px, 1fr)); gap: 10px; }
+    .details div { overflow-wrap: anywhere; }
+    .details dt { color: #afbdcf; }
+    .details dd { margin: 2px 0 0; }
+    #results { max-height: 250px; overflow: auto; margin: 0; padding-left: 24px; }
+    #results li { padding: 5px 0; overflow-wrap: anywhere; }
+    #results code { white-space: pre-wrap; overflow-wrap: anywhere; }
+    a { color: #9acbff; }
+  </style>
+</head>
+<body>
+<main>
+  <header>
+    <div>
+      <h1>轨迹仿真与人工标注</h1>
+      <p class="muted">无 GUI Isaac Sim 中由 PhysX 执行动作；只展示实时 top 视角，模型仍在每 8 步采集三路训练相机。仅 S / F 已标注轮计入成功率，不设单轮时间限制。</p>
+    </div>
+    <span id="phase" class="notice" role="status">正在连接仿真…</span>
+  </header>
+
+  <section class="panel" aria-label="实时 top 相机画面">
+    <div class="row" style="justify-content: space-between; margin-bottom: 12px">
+      <h2 style="margin:0">Top 相机 · Isaac Sim RTX 实时画面</h2>
+      <span id="round-short" class="muted">等待当前轮</span>
+    </div>
+    <div class="viewer">
+      <img id="top-frame" alt="当前轮 top 相机仿真画面" hidden>
+      <span id="frame-empty">等待当前轮首帧…</span>
+    </div>
+  </section>
+
+  <section class="panel">
+    <h2>人工判定</h2>
+    <div class="actions">
+      <button type="button" id="success" disabled>成功 (S)</button>
+      <button type="button" id="failure" disabled>失败 (F)</button>
+      <button type="button" id="stop" disabled>停止会话</button>
+    </div>
+    <p class="muted" style="margin-top:10px">在本页面按 S / F，或点击对应按钮，可结束当前轮、保存末帧并自动进入下一条轨迹；按键需要本页面处于焦点。停止会话将未标注轮记为 aborted，不计失败。</p>
+    <p id="feedback" class="notice" role="status" aria-live="polite" style="min-height:1.5em; margin-top:8px"></p>
+  </section>
+
+  <section class="panel">
+    <h2>统计与状态</h2>
+    <div class="metrics">
+      <div class="metric">成功<strong id="stat-success">0</strong></div>
+      <div class="metric">失败<strong id="stat-failure">0</strong></div>
+      <div class="metric">已标注<strong id="stat-labeled">0</strong></div>
+      <div class="metric">中止<strong id="stat-aborted">0</strong></div>
+      <div class="metric">成功率<strong id="stat-rate">—</strong></div>
+    </div>
+    <div id="stats-extra" class="metrics" style="margin-top:10px"></div>
+    <dl class="details">
+      <div><dt>轮次</dt><dd id="round">—</dd></div>
+      <div><dt>轨迹 ID</dt><dd id="episode">—</dd></div>
+      <div><dt>仿真步数 / 推理次数</dt><dd id="progress">—</dd></div>
+      <div><dt>仿真时间 / 墙钟时间</dt><dd id="time">—</dd></div>
+      <div><dt>最近推理耗时</dt><dd id="inference-ms">—</dd></div>
+      <div><dt>模型</dt><dd id="model">—</dd></div>
+      <div><dt>模型输入与显示渲染器</dt><dd id="renderer">—</dd></div>
+      <div><dt>结果目录</dt><dd id="output-dir">—</dd></div>
+      <div><dt>当前轮 ID</dt><dd id="round-id">—</dd></div>
+    </dl>
+    <p id="controller-error" class="error" role="alert" hidden></p>
+  </section>
+  <section class="panel">
+    <h2>已保存结果（首帧 / 末帧路径）</h2>
+    <ol id="results"><li class="muted">尚无已结束轮次</li></ol>
+  </section>
+</main>
+<script>
+'use strict';
+const $ = (id) => document.getElementById(id);
+const frameElement = $('top-frame');
+let state = null;
+let frameURL = null;
+let frameRequest = null;
+let frameEpoch = 0;
+let displayedVersion = -1;
+let labelPending = false;
+let stopPending = false;
+let statusPending = false;
+let acceptedRoundId = null;
+let stopAccepted = false;
+let renderedResults = '';
+
+const text = (value) => value == null || value === '' ? '—' : String(value);
+const number = (value, digits = 1) => typeof value === 'number' && Number.isFinite(value)
+  ? value.toFixed(digits) : '—';
+
+function setFeedback(message, error = false) {
+  $('feedback').textContent = message;
+  $('feedback').className = error ? 'error' : 'notice';
+}
+
+function resetFrame() {
+  ++frameEpoch;
+  if (frameRequest) frameRequest.abort();
+  frameRequest = null;
+  displayedVersion = -1;
+  frameElement.hidden = true;
+  frameElement.removeAttribute('src');
+  $('frame-empty').hidden = false;
+  $('frame-empty').textContent = '等待当前轮首帧…';
+  if (frameURL) URL.revokeObjectURL(frameURL);
+  frameURL = null;
+}
+
+function renderResults(results) {
+  const fingerprint = JSON.stringify(results);
+  if (fingerprint === renderedResults) return;
+  renderedResults = fingerprint;
+  const list = $('results');
+  list.replaceChildren();
+  if (!Array.isArray(results) || !results.length) {
+    const item = document.createElement('li');
+    item.textContent = '尚无已结束轮次';
+    item.className = 'muted';
+    list.append(item);
+    return;
+  }
+  for (const entry of results) {
+    const item = document.createElement('li');
+    const value = entry && typeof entry === 'object' ? entry : { value: entry };
+    const label = value.result === 'success' ? '成功' : value.result === 'failure' ? '失败'
+      : value.result === 'aborted' ? '中止' : text(value.result);
+    const first = value.first_image ?? value.first_frame_path ?? value.first_frame ?? value.first_path;
+    const last = value.last_image ?? value.last_frame_path ?? value.last_frame ?? value.last_path;
+    item.textContent = `${text(value.round_number)} · ${text(value.episode_id)} · ${label}`;
+    for (const [kind, caption, path] of [['first', '首帧', first], ['last', '末帧', last]]) {
+      item.append(document.createTextNode(` · ${caption}：`));
+      if (path != null && value.round_id != null) {
+        const link = document.createElement('a');
+        link.href = `/api/artifact?round_id=${encodeURIComponent(value.round_id)}&kind=${kind}`;
+        link.target = '_blank';
+        link.rel = 'noopener noreferrer';
+        link.textContent = text(path);
+        item.append(link);
+      } else {
+        item.append(document.createTextNode(text(path)));
+      }
+    }
+    if (first == null && last == null) {
+      const details = document.createElement('code');
+      details.textContent = ` ${JSON.stringify(value)}`;
+      item.append(details);
+    }
+    list.append(item);
+  }
+}
+
+function renderStatus(next) {
+  const previousRound = state?.round_id ?? null;
+  const nextRound = next.round_id ?? null;
+  if (previousRound !== nextRound) {
+    resetFrame();
+    if (state !== null && nextRound !== null) {
+      setFeedback(`已切换至第 ${text(next.round_number)} / ${text(next.total_episodes)} 轮，等待首帧。`);
+    }
+  }
+  state = next;
+  const phaseLabel = {
+    loading: '正在加载下一条轨迹的初始场景…',
+    running: '仿真进行中 · 等待人工判定',
+    saving: '正在停止当前轮并保存末帧…',
+    stopping: '正在停止会话并保存当前轮…',
+    finished: '数据集/会话已结束',
+    error: '仿真发生错误'
+  };
+  $('phase').textContent = phaseLabel[next.phase] ?? text(next.phase);
+  $('round-short').textContent = nextRound ? `第 ${text(next.round_number)} / ${text(next.total_episodes)} 轮` : '无当前轮';
+  $('round').textContent = `${text(next.round_number)} / ${text(next.total_episodes)}`;
+  $('episode').textContent = text(next.episode_id);
+  $('round-id').textContent = text(nextRound);
+  $('progress').textContent = `${text(next.tick)} 步 / ${text(next.inference_count)} 次`;
+  $('time').textContent = `${number(next.sim_seconds)} s / ${number(next.wall_seconds)} s`;
+  $('inference-ms').textContent = next.last_inference_ms == null ? '—' : `${number(next.last_inference_ms)} ms`;
+  $('model').textContent = text(next.model);
+  $('renderer').textContent = text(next.renderer);
+  $('output-dir').textContent = text(next.output_dir);
+  const stats = next.stats ?? {};
+  $('stat-success').textContent = text(stats.success ?? 0);
+  $('stat-failure').textContent = text(stats.failure ?? 0);
+  $('stat-labeled').textContent = text(stats.labeled ?? 0);
+  $('stat-aborted').textContent = text(stats.aborted ?? 0);
+  $('stat-rate').textContent = stats.success_rate == null ? '—' : `${(stats.success_rate * 100).toFixed(1)}%`;
+  const extra = $('stats-extra');
+  extra.replaceChildren();
+  const standard = new Set(['success', 'failure', 'labeled', 'aborted', 'success_rate']);
+  for (const [name, value] of Object.entries(stats)) {
+    if (standard.has(name)) continue;
+    const card = document.createElement('div');
+    card.className = 'metric';
+    const label = {errors: '运行错误', mean_wall_seconds: '已标注轮平均耗时',
+      mean_sim_seconds: '已标注轮平均仿真时间', inference_count: '已结束轮推理次数'}[name] ?? name;
+    card.textContent = label;
+    const amount = document.createElement('strong');
+    amount.textContent = name.endsWith('_seconds') && value != null ? `${number(value)} s` : text(value);
+    card.append(amount);
+    extra.append(card);
+  }
+  $('controller-error').textContent = next.error ?? '';
+  $('controller-error').hidden = !next.error;
+  renderResults(next.results);
+  const canLabel = next.phase === 'running' && !!nextRound && !labelPending
+    && !stopPending && !stopAccepted && acceptedRoundId !== nextRound;
+  $('success').disabled = !canLabel;
+  $('failure').disabled = !canLabel;
+  $('stop').disabled = stopPending || stopAccepted || next.phase === 'finished' || next.phase === 'stopping';
+  if (nextRound && Number.isFinite(next.frame_version)) loadFrame(nextRound, next.frame_version);
+  if (next.phase === 'finished') setFeedback('会话已结束。只有已标注的成功/失败轮次计入成功率。');
+}
+
+async function loadFrame(roundId, version) {
+  if (!state || state.round_id !== roundId || displayedVersion >= version) return;
+  if (frameRequest) return;
+  const abort = new AbortController();
+  const epoch = frameEpoch;
+  frameRequest = abort;
+  let received = false;
+  try {
+    const response = await fetch(`/api/frame?round_id=${encodeURIComponent(roundId)}`, {
+      cache: 'no-store', signal: abort.signal
+    });
+    if (response.status === 204) return;
+    if (!response.ok) throw new Error(`画面请求失败 (${response.status})`);
+    if (decodeURIComponent(response.headers.get('X-Round-Id') ?? '') !== roundId) return;
+    const url = URL.createObjectURL(await response.blob());
+    try {
+      const decoded = new Image();
+      decoded.src = url;
+      await decoded.decode();
+      if (epoch !== frameEpoch || state?.round_id !== roundId || version < displayedVersion) return;
+      const oldURL = frameURL;
+      frameURL = url;
+      frameElement.src = url;
+      frameElement.hidden = false;
+      $('frame-empty').hidden = true;
+      displayedVersion = version;
+      received = true;
+      if (oldURL) URL.revokeObjectURL(oldURL);
+    } finally {
+      if (!received) URL.revokeObjectURL(url);
+    }
+  } catch (error) {
+    if (error.name !== 'AbortError' && state?.round_id === roundId) {
+      $('frame-empty').textContent = '正在等待 top 画面…';
+    }
+  } finally {
+    if (frameRequest === abort) frameRequest = null;
+    if (received && state?.round_id === roundId && state.frame_version > displayedVersion) {
+      loadFrame(roundId, state.frame_version);
+    }
+  }
+}
+
+async function refresh() {
+  if (statusPending) return;
+  statusPending = true;
+  try {
+    const response = await fetch('/api/status', {cache: 'no-store'});
+    if (!response.ok) throw new Error(`状态请求失败 (${response.status})`);
+    renderStatus(await response.json());
+  } catch (error) {
+    $('phase').textContent = '无法获取仿真状态';
+    $('controller-error').textContent = String(error);
+    $('controller-error').hidden = false;
+    $('success').disabled = true;
+    $('failure').disabled = true;
+  } finally {
+    statusPending = false;
+    window.setTimeout(refresh, 200);
+  }
+}
+
+async function sendLabel(result) {
+  if (labelPending || stopPending || stopAccepted || state?.phase !== 'running'
+      || !state.round_id || acceptedRoundId === state.round_id) return;
+  const roundId = state.round_id;
+  labelPending = true;
+  $('success').disabled = true;
+  $('failure').disabled = true;
+  setFeedback(`正在标注第 ${text(state.round_number)} 轮并保存末帧…`);
+  try {
+    const response = await fetch('/api/label', {
+      method: 'POST', headers: {'Content-Type': 'application/json', 'X-Requested-With': 'XMLHttpRequest'},
+      body: JSON.stringify({round_id: roundId, result})
+    });
+    const reply = await response.json();
+    if (!response.ok) throw new Error(reply.error ?? `标注失败 (${response.status})`);
+    acceptedRoundId = roundId;
+    if (state?.round_id === roundId) setFeedback('标注已提交，等待末帧保存及下一轮自动加载…');
+  } catch (error) {
+    if (state?.round_id === roundId) setFeedback(String(error), true);
+  } finally {
+    labelPending = false;
+    // Never apply a label response as status: polling may already be on the next round.
+    if (state) renderStatus(state);
+  }
+}
+
+async function stopSession() {
+  if (stopPending || stopAccepted || state?.phase === 'finished' || state?.phase === 'stopping') return;
+  stopPending = true;
+  $('stop').disabled = true;
+  $('success').disabled = true;
+  $('failure').disabled = true;
+  setFeedback('正在停止会话；未标注轮会记为 aborted，不计失败。');
+  try {
+    const response = await fetch('/api/stop', {
+      method: 'POST', headers: {'X-Requested-With': 'XMLHttpRequest'}
+    });
+    const reply = await response.json();
+    if (!response.ok) throw new Error(reply.error ?? `停止失败 (${response.status})`);
+    stopAccepted = true;
+    setFeedback('停止请求已接受，等待保存完成。');
+  } catch (error) {
+    setFeedback(String(error), true);
+  } finally {
+    stopPending = false;
+    if (state) renderStatus(state);
+  }
+}
+
+$('success').addEventListener('click', () => sendLabel('success'));
+$('failure').addEventListener('click', () => sendLabel('failure'));
+$('stop').addEventListener('click', stopSession);
+document.addEventListener('keydown', (event) => {
+  if (event.repeat || event.ctrlKey || event.altKey || event.metaKey || event.isComposing) return;
+  const target = event.target;
+  if (target instanceof Element && (target.closest('input, textarea, select, [contenteditable]') || target.isContentEditable)) return;
+  const key = event.key.toLowerCase();
+  if (key === 's' || key === 'f') {
+    event.preventDefault();
+    sendLabel(key === 's' ? 'success' : 'failure');
+  }
+});
+refresh();
+</script>
+</body>
+</html>

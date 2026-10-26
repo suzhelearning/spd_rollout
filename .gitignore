@@ -1,0 +1,33 @@
+__pycache__/
+.pytest_cache/
+*.py[cod]
+.venv/
+outputs/
+
+# Machine-local dependencies and data are symlinks on 5090-104.
+/abc
+/assets
+/checkpoints
+/data_collection
+/dino
+/runtime
+/samples
+/spd_source
+
+# Deployment manifests and selected source inventories contain machine-local paths.
+/deployment.json
+/baseline30k-*
+/evaluation-20pct-selection.json
+
+# Never publish model weights, recordings, cache or per-episode evidence.
+*.pt
+*.pth
+*.safetensors
+*.h5
+*.hdf5
+*.npz
+*.usda
+*.usd
+*.mp4
+*.log
+*.tmp
